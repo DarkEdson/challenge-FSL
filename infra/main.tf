@@ -239,12 +239,12 @@ resource "aws_iam_role" "github" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
-            StringLike = {
-              "token.actions.githubusercontent.com:sub" = [
-                "repo:${var.github_repository}:*",
-                "repo:DarkEdson@13042447/challenge-FSL@1359818696:*"
-              ]
-            }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = [
+              "repo:${var.github_repository}:*",
+              "repo:DarkEdson@13042447/challenge-FSL@1359818696:*"
+            ]
+          }
         }
       }
     ]
