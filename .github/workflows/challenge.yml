@@ -1,0 +1,33 @@
+name: Challenge CI-CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+    ci:
+        name: Install, link, test and build
+        runs-on: ubuntu-22.04
+        timeout-minutes: 15
+        defaults:
+            run:
+                working-directory: ./codebase/rdicidr-0.1.0
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                node-version: 15.14.0
+            - name: Install dependencies
+              run: npm install
+            - name: ESLint
+              run: npm run lint
+            - name: Jest
+              run: CI=true npm run test
+            - name: Build
+              run: npm run build

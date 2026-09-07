@@ -1,0 +1,9 @@
+**/node_ignore/
+**/build/
+.env
+*.log
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
