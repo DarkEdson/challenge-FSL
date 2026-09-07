@@ -238,7 +238,9 @@ resource "aws_iam_role" "github" {
         Condition = {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:ref:refs/heads/main"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:*"
           }
         }
       }
@@ -258,10 +260,17 @@ resource "aws_iam_role_policy" "github" {
           "ecr:BatchCheckLayerAvailability",
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
           "ecs:RegisterTaskDefinition",
           "ecs:UpdateService",
           "ecs:DescribeServices",
           "ecs:DescribeTaskDefinition",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks",
+          "ec2:DescribeNetworkInterfaces",
           "iam:PassRole"
         ]
         Resource = "*"

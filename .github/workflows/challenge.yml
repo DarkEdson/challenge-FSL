@@ -2,7 +2,7 @@ name: Challenge CI-CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -11,73 +11,156 @@ permissions:
   contents: read
 
 jobs:
-    ci:
-        name: Install, link, test and build
-        runs-on: ubuntu-22.04
-        timeout-minutes: 15
-        defaults:
-            run:
-                working-directory: ./codebase/rdicidr-0.1.0
-        steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
-              with:
-                node-version: 15.14.0
-            - name: Install dependencies
-              run: npm install
-            - name: ESLint
-              run: npm run lint
-            - name: Jest
-              run: CI=true npm run test
-            - name: Build
-              run: npm run build
-    deploy:
-        name: Deploy to AWS
-        runs-on: ubuntu-22.04
-        needs: ci
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        timeout-minutes: 15
-        concurrency:
-            group: "challenge-fsl-production"
-            cancel-in-progress: false
-        permissions:
-            id-token: write
-            contents: read
-        env:
-            AWS_REGION: ${{ vars.AWS_REGION }}
-            ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-            ECR_CLUSTER: ${{ vars.ECR_CLUSTER }}
-            ECR_SERVICE: ${{ vars.ECR_SERVICE }}
-        steps:
-            - uses: actions/checkout@v4
-            - uses: aws-actions/configure-aws-credentials@v4
-              with:
-                role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-                aws-region: ${{ vars.AWS_REGION }}
-            - uses: aws-actions/amazon-ecr-login@v2
-              id: ecr
-            - name: Build and push Docker image
-              run: |
-                IMAGE="$REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
-                docker build -t $IMAGE ./codebase/rdicidr-0.1.0
-                docker push "$IMAGE"
-                echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-            - name: Register revision and deploy
-              run: |
-                CURRENT=$(aws ecs describe-services --cluster $ECR_CLUSTER --services $ECR_SERVICE --query "services[0].taskDefinition" --output text)
-                aws ecs describe-task-definition --task-definition $CURRENT --query taskDefinition > current.json
-                jq --arg IMAGE "$IMAGE" '{family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions, volumes, placementConstraints, requiresCompatibilities, cpu, memory, runtimePlatform, ephemeralStorage} | with_entries(select(.value != null)) | (.conatinerDefinitions[] | select(.name == "web").image) = $image' current.json > task.json
-                TASK_DEF=$(aws ecs register-task-definition --cli-input-json file://task.json --query "taskDefinition.taskDefinitionArn" --output text)
-                echo "TASK_DEF=$TASK_DEF" >> $GITHUB_ENV
-                aws ecs update-service --cluster $ECR_CLUSTER --service $ECR_SERVICE --task-definition $TASK_DEF --desired-count 1 > /dev/null
-                aws ecs wait services-stable --cluster $ECR_CLUSTER --services $ECR_SERVICE
-            - name: Verify Deployment
-              run: |
-                ACTIVE=$(aws ecs describe-services --cluster $ECR_CLUSTER --services $ECR_SERVICE --query "services[0].taskDefinition" --output text)
-                test "$ACTIVE" = "$TASK_DEF" || {echo "Service rolled back or changed revision"; exit 1;}
-                TASK=$(aws ecs list-tasks --cluster $ECR_CLUSTER --service-name $ECR_SERVICE --desired-status RUNNING --query "taskArns[0]" --output text)
-                aws ecs describe-tasks --cluster $ECR_CLUSTER --tasks $TASK > running.json
-                jq -e --arg expected "$TASK_DEF" '.tasks[0].taskDefinitionArn == $expected' and .tasks[0].lastStatus == "RUNNING"' and .tasks[0].healthStatus == "HEALTHY" running.json ENI=$(jq -r '.tasks[0].attachments[0].details[] | select(.name == "networkInterfaceId") | .value' running.json)
-                IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI --query "NetworkInterfaces[0].Association.PublicIp" --output text)
-                test -n "$IP" && test "$IP" != "None"
-                curl --fail --retry 12 --retry-delay 5 --retry-all-erros --connect-timeout 5 --max-time 10 "http://$IP" -o /dev/null echo "### Application: http://$IP" >> "GITHUB_STEP_SUMMARY" echo "Image: $IMAGE" >> "GITHUB_STEP_SUMMARY" echo "Task Definition: $TASK_DEF" >> "GITHUB_STEP_SUMMARY"
+  ci:
+    name: Install, lint, test and build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ./codebase/rdicidr-0.1.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 15.14.0
+      - name: Install dependencies
+        run: npm install
+      - name: ESLint
+        run: npm run lint
+      - name: Jest
+        run: CI=true npm run test
+      - name: Build
+        run: npm run build
+
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-22.04
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    timeout-minutes: 20
+    concurrency:
+      group: challenge-fsl-production
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: challenge-fsl
+      ECS_CLUSTER: challenge-fsl
+      ECS_SERVICE: challenge-fsl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build -t "$IMAGE" ./codebase/rdicidr-0.1.0
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Register task definition revision and deploy
+        run: |
+          CURRENT=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT" \
+            --query taskDefinition > current.json
+
+          jq --arg IMAGE "$IMAGE" '
+            {
+              family,
+              taskRoleArn,
+              executionRoleArn,
+              networkMode,
+              containerDefinitions,
+              volumes,
+              placementConstraints,
+              requiresCompatibilities,
+              cpu,
+              memory,
+              runtimePlatform,
+              ephemeralStorage
+            }
+            | with_entries(select(.value != null))
+            | (.containerDefinitions[] | select(.name == "web").image) = $IMAGE
+          ' current.json > task.json
+
+          TASK_DEF=$(aws ecs register-task-definition \
+            --cli-input-json file://task.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "TASK_DEF=$TASK_DEF" >> "$GITHUB_ENV"
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEF" \
+            --desired-count 1 > /dev/null
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+      - name: Verify deployment
+        run: |
+          ACTIVE=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          test "$ACTIVE" = "$TASK_DEF"
+
+          TASK=$(aws ecs list-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --service-name "$ECS_SERVICE" \
+            --desired-status RUNNING \
+            --query 'taskArns[0]' \
+            --output text)
+
+          test -n "$TASK" && test "$TASK" != "None"
+
+          aws ecs describe-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --tasks "$TASK" > running.json
+
+          jq -e --arg expected "$TASK_DEF" '
+            .tasks[0].taskDefinitionArn == $expected
+            and .tasks[0].lastStatus == "RUNNING"
+            and .tasks[0].healthStatus == "HEALTHY"
+          ' running.json
+
+          ENI=$(jq -r '
+            .tasks[0].attachments[0].details[]
+            | select(.name == "networkInterfaceId")
+            | .value
+          ' running.json)
+
+          IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "$ENI" \
+            --query 'NetworkInterfaces[0].Association.PublicIp' \
+            --output text)
+
+          test -n "$IP" && test "$IP" != "None"
+          curl --fail --retry 12 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 5 --max-time 10 "http://$IP/" -o /dev/null
+
+          echo "### Application: http://$IP" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Task Definition: $TASK_DEF" >> "$GITHUB_STEP_SUMMARY"
